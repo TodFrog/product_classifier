@@ -1,0 +1,100 @@
+[
+  {
+    "name": "hand",
+    "id": 0,
+    "color": "#F08CB3",
+    "type": "any",
+    "attributes": []
+  },
+  {
+    "name": "chickenmayo",
+    "id": 1,
+    "color": "#fa99a0",
+    "type": "any",
+    "attributes": []
+  },
+  {
+    "name": "seaweed_soup",
+    "id": 2,
+    "color": "#134c82",
+    "type": "any",
+    "attributes": []
+  },
+  {
+    "name": "condition_stick",
+    "id": 3,
+    "color": "#c6664c",
+    "type": "any",
+    "attributes": []
+  },
+  {
+    "name": "pepero_original",
+    "id": 4,
+    "color": "#f736a0",
+    "type": "any",
+    "attributes": []
+  },
+  {
+    "name": "pulmuone_spring_water",
+    "id": 5,
+    "color": "#4eb012",
+    "type": "any",
+    "attributes": []
+  },
+  {
+    "name": "samdasoo",
+    "id": 6,
+    "color": "#f69bde",
+    "type": "any",
+    "attributes": []
+  },
+  {
+    "name": "creeat_protein_bar",
+    "id": 7,
+    "color": "#415f5e",
+    "type": "any",
+    "attributes": []
+  },
+  {
+    "name": "hotbar",
+    "id": 8,
+    "color": "#eeb031",
+    "type": "any",
+    "attributes": []
+  },
+  {
+    "name": "egg",
+    "id": 9,
+    "color": "#bad6ed",
+    "type": "any",
+    "attributes": []
+  },
+  {
+    "name": "protein_shake",
+    "id": 10,
+    "color": "#08783a",
+    "type": "any",
+    "attributes": []
+  },
+  {
+    "name": "vita500",
+    "id": 11,
+    "color": "#06daee",
+    "type": "any",
+    "attributes": []
+  },
+  {
+    "name": "pizza_combination",
+    "id": 12,
+    "color": "#d78bd6",
+    "type": "any",
+    "attributes": []
+  },
+  {
+    "name": "protein_hatban",
+    "id": 13,
+    "color": "#67d8bf",
+    "type": "any",
+    "attributes": []
+  }
+]

@@ -1,0 +1,173 @@
+# AI Vending Machine Configuration
+# Based on plan_new.md architecture
+
+# Hardware Configuration
+hardware:
+  # Camera IDs
+  top_camera_id: 0       # Top camera for session management
+  side_camera_id: 2      # Side camera for product detection
+
+  # Serial Communication
+  loadcell_port: '/dev/ttyUSB0'
+  loadcell_baudrate: 115200
+
+  # Load Cell Addresses (I2C)
+  # Format: layer_id: [left_address, right_address]
+  loadcell_addresses:
+    0: [1, 2]  # Layer 0: Left=1, Right=2
+
+# Vision System
+vision:
+  # Model selection (choose based on device):
+  # - .engine: TensorRT (GPU only, fastest)
+  # - .onnx: ONNX (CPU/GPU compatible)
+  # - .pt: PyTorch (CPU/GPU compatible)
+  model_path: '/home/chai/Desktop/classifier/product_classifier/src/yolo_models/1203_v8n_merged_drop02_mix01_mos05_hsv_h00_s025_v03.engine'
+  device: '0'  # CUDA GPU device (use 'cpu' for CPU, '0' for GPU)
+  confidence_threshold: 0.5
+  input_size: 640
+
+  # Camera settings
+  camera_width: 640
+  camera_height: 480
+  camera_fps: 30
+
+  # Frame buffering
+  buffer_size: 100  # frames (2 seconds @ 30fps)
+  lookback_time: 1.0  # seconds
+
+# Kalman Filter Parameters
+kalman:
+  process_noise: 0.5     # Q: Model uncertainty (increased for faster convergence)
+  measurement_noise: 1.0  # R: Sensor noise covariance
+  dead_zone: 3.0         # Dead zone: snap to zero if |weight| < threshold (grams)
+
+# Event Detection
+event_detection:
+  weight_change_threshold: 5.0  # grams
+  settling_time: 2.0            # seconds
+  variance_threshold: 0.5       # for stability check
+
+# Fusion Engine
+fusion:
+  tolerance_percent: 0.10  # 10% weight tolerance
+
+  # Inference settings
+  inference_frames: 90  # Number of frames to analyze from side camera (30fps → 2 seconds)
+                        # Recommended: 50-100 frames for robustness
+                        # 30fps: 60 frames = 2 seconds, 90 frames = 3 seconds
+
+  # Debug frame saving (디버깅용 프레임 저장)
+  save_debug_frames: true  # Enable frame saving for debugging
+  debug_frames_path: 'debug_frames'  # Base directory for saved frames
+  save_annotated: true  # Save frames with YOLO bounding boxes
+
+# Operation Mode & Zeroing System
+operation:
+  # Initial mode: NORMAL (customer) or RESTOCKING (owner)
+  initial_mode: 'NORMAL'
+
+  # Auto drift correction (백그라운드 자동 보정)
+  auto_drift_correction:
+    enabled: true
+    stability_time: 600.0      # 10 minutes of stable weight
+    drift_threshold: 50.0      # Max drift to auto-correct (grams)
+    stability_variance: 5.0    # Max variance during stability period
+
+  # Manual zeroing
+  manual_zeroing:
+    enabled: true
+    require_confirmation: true  # Prevent accidental zeroing
+
+# Product Database
+# ID must match 13subset_label.json
+products:
+  0:
+    name: 'hand'
+    weight: 0.0
+    tolerance: 0.0
+    is_product: false
+
+  1:
+    name: 'chickenmayo'
+    weight: 365.0
+    tolerance: 5.0
+    is_product: true
+
+  2:
+    name: 'seaweed_soup'
+    weight: 209.0
+    tolerance: 5.0
+    is_product: true
+
+  3:
+    name: 'condition_stick'
+    weight: 20.0
+    tolerance: 3.0
+    is_product: true
+
+  4:
+    name: 'pepero_original'
+    weight: 69.0
+    tolerance: 3.0
+    is_product: true
+
+  5:
+    name: 'pulmuone_spring_water'
+    weight: 520.0
+    tolerance: 10.0
+    is_product: true
+
+  6:
+    name: 'samdasoo'
+    weight: 520.0
+    tolerance: 10.0
+    is_product: true
+
+  7:
+    name: 'creeat_protein_bar'
+    weight: 57.0
+    tolerance: 5.0
+    is_product: true
+
+  8:
+    name: 'hotbar'
+    weight: 107.0
+    tolerance: 5.0
+    is_product: true
+
+  9:
+    name: 'egg'
+    weight: 93.0
+    tolerance: 5.0
+    is_product: true
+
+  10:
+    name: 'protein_shake'
+    weight: 85.0
+    tolerance: 10.0
+    is_product: true
+
+  11:
+    name: 'vita500'
+    weight: 275.0
+    tolerance: 5.0
+    is_product: true
+
+  12:
+    name: 'pizza_combination'
+    weight: 103.0
+    tolerance: 10.0
+    is_product: true
+
+  13:
+    name: 'protein_hatban'
+    weight: 269.0
+    tolerance: 5.0
+    is_product: true
+
+# Logging
+logging:
+  level: 'INFO'
+  log_file: 'vending_machine.log'
+  transaction_log: 'transactions.log'

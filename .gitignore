@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+*_log.txt
+logs/
+
+# Debug frames (generated during runtime)
+debug_frames/
+
+# YOLO model files (large files - download separately)
+# Keep .engine for Jetson, exclude .pt and .onnx
+src/yolo_models/*.pt
+src/yolo_models/*.onnx
+src/yolo_models/*.engine
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Environment variables
+.env
+.env.local
+
+# Test outputs
+test_outputs/
+*.tmp
+
+# Backup files
+*.bak
+old_files/

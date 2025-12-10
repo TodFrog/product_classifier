@@ -1,0 +1,18 @@
+# AI Smart Vending Machine Requirements
+# Based on plan_new.md architecture
+
+# Computer Vision
+opencv-python>=4.8.0
+ultralytics>=8.0.0
+
+# Serial Communication
+pyserial>=3.5
+
+# Scientific Computing
+numpy>=1.24.0
+
+# Configuration
+pyyaml>=6.0.0
+
+# System
+python-dateutil>=2.8.0
