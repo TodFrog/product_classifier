@@ -65,3 +65,5 @@ test_outputs/
 # Backup files
 *.bak
 old_files/
+captured_events/
+event_queue/

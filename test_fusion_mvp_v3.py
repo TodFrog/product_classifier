@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MVP Fusion Test v2: Load Cell + Vision Integration with Event Queue
-Sensor Fusion 프로토타입 - Enhanced with Event Queue System
+MVP Fusion Test v3: Hand-Product IoU based Product Detection
+Sensor Fusion 프로토타입 - Enhanced with Hand-Product Overlap Detection
+
+개선사항 (v3):
+- Hand-Product IoU: 손과 상품의 겹침 정도로 실제 집은 상품 판별
+- Dual Camera Hand Tracking: Top + Side 카메라에서 손 위치 추적
+- Hand Overlap Scoring: 손과 겹치는 상품에 가중치 부여
+- Multi-Product Disambiguation: 여러 상품 동시 이동 시 정확한 판별
+- Auto-Exposure Disable: 카메라 자동 노출 비활성화로 일관된 밝기 유지
+- CLAHE Preprocessing: 적응형 히스토그램 평활화로 조명 변화에 강건한 감지
 
 개선사항 (v2):
 - Event Queue: 연속 이벤트 처리
 - Cancellation Detection: 가져갔다 바로 돌려놓기 감지
-- Event Timeout: 오래된 이벤트 자동 삭제
-- Start Weight Tracking: 이벤트 시작 무게 기록
+- Motion-Based Filtering: 움직이는 상품만 후보군 등록
 
 전략:
-- Top Camera (ID 0): 실시간 hand detection (상시 모니터링)
-- Side Camera (ID 2): 무게 변화 감지 → 프레임 저장 → 배치 추론
+- Top Camera (ID 0): Hand detection + Hand-Product proximity
+- Side Camera (ID 2): Hand-Product IoU 계산 + 상품 인식
 - Load Cell: 무게 변화 감지 → Event Trigger
-- Fusion: Vision CLASS + Weight COUNT
+- Fusion: Vision(CLASS) + Weight(COUNT) + Hand Overlap(PRIORITY)
+- Image Preprocessing: CLAHE for consistent brightness normalization
 """
 
 import sys
@@ -39,7 +47,6 @@ from ultralytics import YOLO
 from loadcell_serial import LoadCellSerial
 from loadcell_protocol import LoadCellProtocol
 from filters.kalman_filter import LoadCellKalmanFilter
-from utils.image_preprocessor import ImagePreprocessor
 
 
 class SystemState(Enum):
@@ -64,6 +71,9 @@ class WeightEvent:
     captured_frames: List  # Frames captured from side camera
     top_camera_frames: List  # Frames captured from top camera
     event_id: int
+    # Pre-captured frames at the moment of weight change detection
+    pre_captured_side: List = None  # Snapshot of side buffer when event triggered
+    pre_captured_top: List = None   # Snapshot of top buffer when event triggered
 
 
 class EventQueue:
@@ -188,22 +198,78 @@ class VendingMachineUI:
     - READY: Idle, waiting for customer
     - PROCESSING: Item being detected
     - RESULT: Display detected item and count
+
+    Features:
+    - Transaction log panel on the right side
     """
     def __init__(self, fusion_system=None):
         self.fusion_system = fusion_system  # Reference to main system for keyboard commands
 
         self.root = tk.Tk()
         self.root.title("AI Smart Vending Machine")
-        self.root.geometry("900x750")
+        self.root.geometry("1200x750")  # Wider for log panel
         self.root.configure(bg='#2c3e50')
 
-        # Main container
-        main_frame = tk.Frame(self.root, bg='#2c3e50')
-        main_frame.pack(expand=True, fill='both', padx=20, pady=20)
+        # Transaction log history
+        self.transaction_log = []
 
+        # ========== Main Layout: Left (status) + Right (log) ==========
+        container = tk.Frame(self.root, bg='#2c3e50')
+        container.pack(expand=True, fill='both', padx=10, pady=10)
+
+        # Left panel - Status display
+        left_frame = tk.Frame(container, bg='#2c3e50')
+        left_frame.pack(side=tk.LEFT, expand=True, fill='both', padx=10)
+
+        # Right panel - Transaction log
+        right_frame = tk.Frame(container, bg='#34495e', relief=tk.RIDGE, bd=2, width=350)
+        right_frame.pack(side=tk.RIGHT, fill='y', padx=10, pady=5)
+        right_frame.pack_propagate(False)  # Fixed width
+
+        # ========== Right Panel: Transaction Log ==========
+        log_title = tk.Label(
+            right_frame,
+            text="📋 Transaction Log",
+            font=("Arial", 16, "bold"),
+            fg="#ecf0f1",
+            bg="#34495e"
+        )
+        log_title.pack(pady=10)
+
+        # Scrollable log list
+        log_container = tk.Frame(right_frame, bg="#2c3e50")
+        log_container.pack(expand=True, fill='both', padx=5, pady=5)
+
+        self.log_canvas = tk.Canvas(log_container, bg="#2c3e50", highlightthickness=0)
+        self.log_scrollbar = tk.Scrollbar(log_container, orient="vertical", command=self.log_canvas.yview)
+        self.log_scrollable_frame = tk.Frame(self.log_canvas, bg="#2c3e50")
+
+        self.log_scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.log_canvas.configure(scrollregion=self.log_canvas.bbox("all"))
+        )
+
+        self.log_canvas.create_window((0, 0), window=self.log_scrollable_frame, anchor="nw")
+        self.log_canvas.configure(yscrollcommand=self.log_scrollbar.set)
+
+        self.log_canvas.pack(side="left", fill="both", expand=True)
+        self.log_scrollbar.pack(side="right", fill="y")
+
+        # Clear log button
+        clear_btn = tk.Button(
+            right_frame,
+            text="Clear Log",
+            font=("Arial", 10),
+            bg="#7f8c8d",
+            fg="white",
+            command=self.clear_transaction_log
+        )
+        clear_btn.pack(pady=5)
+
+        # ========== Left Panel: Status Display ==========
         # Status display (large)
         self.status_label = tk.Label(
-            main_frame,
+            left_frame,
             text="READY",
             font=("Arial", 72, "bold"),
             fg="#2ecc71",
@@ -213,13 +279,16 @@ class VendingMachineUI:
 
         # Product info display
         self.product_label = tk.Label(
-            main_frame,
+            left_frame,
             text="",
             font=("Arial", 36),
             fg="#ecf0f1",
             bg="#2c3e50"
         )
         self.product_label.pack(pady=20)
+
+        # Use left_frame instead of main_frame for remaining widgets
+        main_frame = left_frame
 
         # Control panel (keyboard shortcuts) - ABOVE info panel
         control_frame = tk.Frame(main_frame, bg="#34495e", relief=tk.RIDGE, bd=2)
@@ -375,6 +444,63 @@ class VendingMachineUI:
         self.product_label.config(text="")
         self.root.update()
 
+    def add_transaction_log(self, product_name: str, count: int, action: str = "REMOVED"):
+        """Add entry to transaction log panel"""
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%H:%M:%S")
+
+        # Determine color based on action
+        if action == "ADDED":
+            color = "#2ecc71"  # Green
+            symbol = "+"
+        elif action == "REMOVED":
+            color = "#e74c3c"  # Red
+            symbol = "-"
+        else:
+            color = "#f39c12"  # Orange (error)
+            symbol = "!"
+
+        # Create log entry frame
+        entry_frame = tk.Frame(self.log_scrollable_frame, bg="#3d566e", relief=tk.FLAT, bd=1)
+        entry_frame.pack(fill='x', padx=2, pady=2)
+
+        # Time label
+        time_label = tk.Label(
+            entry_frame,
+            text=timestamp,
+            font=("Arial", 9),
+            fg="#95a5a6",
+            bg="#3d566e"
+        )
+        time_label.pack(side=tk.LEFT, padx=5)
+
+        # Product info
+        info_text = f"{symbol} {product_name} × {abs(count)}"
+        info_label = tk.Label(
+            entry_frame,
+            text=info_text,
+            font=("Arial", 11, "bold"),
+            fg=color,
+            bg="#3d566e"
+        )
+        info_label.pack(side=tk.LEFT, padx=5)
+
+        # Store reference
+        self.transaction_log.append(entry_frame)
+
+        # Auto-scroll to bottom
+        self.log_canvas.update_idletasks()
+        self.log_canvas.yview_moveto(1.0)
+
+        self.root.update()
+
+    def clear_transaction_log(self):
+        """Clear all transaction log entries"""
+        for entry in self.transaction_log:
+            entry.destroy()
+        self.transaction_log.clear()
+        self.root.update()
+
     def on_restock_pressed(self):
         """Handle R key press - Toggle restocking mode"""
         if self.fusion_system is None:
@@ -438,21 +564,27 @@ class VendingMachineUI:
             pass
 
 
-class FusionMVP_v2:
+class FusionMVP_v3:
     """
-    MVP Sensor Fusion System v2 with Event Queue
+    MVP Sensor Fusion System v3 with Hand-Product IoU
+
+    Key Features (v3):
+    - Hand-Product IoU: Determine which product user is holding
+    - Dual Camera Hand Tracking: Top + Side camera hand detection
+    - Hand Overlap Scoring: Prioritize products overlapping with hand
+    - Multi-Product Disambiguation: Accurate detection when multiple products move
 
     Components:
-    - Top Camera: Hand detection (real-time)
-    - Side Camera: Product detection (on-demand)
+    - Top Camera: Hand detection + Product proximity
+    - Side Camera: Hand-Product IoU + Product detection
     - Load Cell: Weight monitoring (continuous)
     - Event Queue: Sequential event processing
-    - Fusion Engine: Combine CLASS + COUNT
+    - Fusion Engine: Vision(CLASS) + Weight(COUNT) + Hand Overlap(PRIORITY)
     """
 
     def __init__(self, config_path: str = 'config.yaml', label_path: str = '13subset_label.json'):
         """
-        Initialize Fusion MVP v2
+        Initialize Fusion MVP v3
 
         Args:
             config_path: Path to configuration file
@@ -471,7 +603,7 @@ class FusionMVP_v2:
                 self.labels = {int(k): v for k, v in label_data.items()}
 
         print("=" * 70)
-        print("MVP Fusion Test v2: Event Queue System")
+        print("MVP Fusion Test v3: Hand-Product IoU System")
         print("=" * 70)
 
         # Configuration
@@ -540,12 +672,6 @@ class FusionMVP_v2:
         # Camera weight for fusion (side camera is more reliable for product detection)
         self.side_camera_weight = 0.7  # 70% weight for side camera
         self.top_camera_weight = 0.3   # 30% weight for top camera
-
-        # Image preprocessor (grayscale + CLAHE + sharpen)
-        self.preprocessor = ImagePreprocessor(clip_limit=2.0, grid_size=(8, 8))
-        self.use_grayscale = fusion_config.get('use_grayscale', True)
-        if not self.use_grayscale:
-            self.preprocessor.disable()
 
         # Load cell components
         self.serial = LoadCellSerial()
@@ -628,9 +754,46 @@ class FusionMVP_v2:
             print(f"[ERROR] Failed to load model: {e}")
             return False
 
+    def preprocess_frame(self, frame):
+        """
+        Preprocess frame using CLAHE for consistent brightness
+
+        CLAHE (Contrast Limited Adaptive Histogram Equalization) normalizes
+        the brightness across the frame, making detection more robust to
+        lighting changes (e.g., when arm enters/exits frame).
+
+        Args:
+            frame: BGR image from camera
+
+        Returns:
+            Preprocessed BGR frame
+        """
+        # Convert to LAB color space (L = Lightness, A/B = color channels)
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+
+        # Split into channels
+        l_channel, a_channel, b_channel = cv2.split(lab)
+
+        # Apply CLAHE to the L (lightness) channel only
+        # clipLimit: Threshold for contrast limiting (higher = more contrast)
+        # tileGridSize: Size of grid for histogram equalization
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        l_channel_clahe = clahe.apply(l_channel)
+
+        # Merge channels back
+        lab_clahe = cv2.merge([l_channel_clahe, a_channel, b_channel])
+
+        # Convert back to BGR
+        result = cv2.cvtColor(lab_clahe, cv2.COLOR_LAB2BGR)
+
+        return result
+
     def open_camera(self, camera_id: int):
         """
-        Open camera
+        Open camera without modifying hardware settings
+
+        카메라 하드웨어 설정은 건드리지 않음 (기본 상태 유지)
+        밝기/조도 일관성은 CLAHE 후처리로 처리
 
         Args:
             camera_id: Camera device ID
@@ -649,10 +812,13 @@ class FusionMVP_v2:
                     print(f"[ERROR] Failed to open camera {camera_id}")
                     return None
 
-            # Set properties
+            # Set resolution and FPS only (safe settings)
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.camera_width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.camera_height)
             cap.set(cv2.CAP_PROP_FPS, self.camera_fps)
+
+            # DO NOT modify exposure/brightness/auto settings
+            # Camera hardware settings cause issues - use CLAHE post-processing instead
 
             # Test read
             ret, test_frame = cap.read()
@@ -661,7 +827,7 @@ class FusionMVP_v2:
                 cap.release()
                 return None
 
-            print(f"[SUCCESS] Camera {camera_id} opened")
+            print(f"[SUCCESS] Camera {camera_id} opened (CLAHE post-processing enabled)")
             return cap
 
         except Exception as e:
@@ -980,15 +1146,48 @@ class FusionMVP_v2:
 
         print("[Thread] Side camera stopped")
 
-    def capture_frames(self, num_frames: int = None):
+    def snapshot_current_buffers(self):
         """
-        Capture frames from both cameras in real-time AFTER weight change detection
+        Take an immediate snapshot of current camera buffers
 
-        This captures frames while the user is picking/placing the item,
-        not before the interaction started.
+        This is called at the MOMENT of weight change detection to capture
+        the frames showing the user's hand movement. These frames are saved
+        with the event and used later for inference, even if processing is delayed.
+
+        Returns:
+            Tuple of (side_frames_snapshot, top_frames_snapshot)
+        """
+        side_snapshot = []
+        top_snapshot = []
+
+        # Copy frames from side buffer
+        with self.side_buffer_lock:
+            for frame_data in self.side_buffer:
+                side_snapshot.append(frame_data['frame'].copy())
+
+        # Copy frames from top buffer
+        with self.top_buffer_lock:
+            for frame_data in self.top_buffer:
+                top_snapshot.append(frame_data['frame'].copy())
+
+        print(f"[Snapshot] Captured buffer snapshot: Side={len(side_snapshot)}, Top={len(top_snapshot)} frames")
+
+        return side_snapshot, top_snapshot
+
+    def capture_frames(self, num_frames: int = None, pre_captured_side: List = None, pre_captured_top: List = None):
+        """
+        Capture frames from both cameras UNTIL weight stabilizes
+
+        This captures frames throughout the entire interaction:
+        - If pre_captured frames exist (from snapshot), use those FIRST
+        - Continues capturing while user picks items (even multiple items)
+        - Stops when weight becomes stable for settling_time
+        - Minimum num_frames ensures enough data for inference
 
         Args:
-            num_frames: Number of frames to capture (default: self.inference_frames)
+            num_frames: Minimum number of frames to capture (default: self.inference_frames)
+            pre_captured_side: Pre-captured side frames from buffer snapshot (optional)
+            pre_captured_top: Pre-captured top frames from buffer snapshot (optional)
 
         Returns:
             Tuple of (side_frames, top_frames)
@@ -996,17 +1195,34 @@ class FusionMVP_v2:
         if num_frames is None:
             num_frames = self.inference_frames
 
-        side_frames = []
-        top_frames = []
+        # Start with pre-captured frames if available
+        # These are frames captured at the MOMENT of weight change detection
+        if pre_captured_side:
+            side_frames = list(pre_captured_side)  # Make a copy
+            print(f"[Capture] Using {len(side_frames)} pre-captured side frames from snapshot")
+        else:
+            side_frames = []
 
-        print(f"[Capture] Capturing {num_frames} frames from both cameras...")
-        print(f"[Capture] Please complete the interaction (pick/place item)...")
+        if pre_captured_top:
+            top_frames = list(pre_captured_top)  # Make a copy
+            print(f"[Capture] Using {len(top_frames)} pre-captured top frames from snapshot")
+        else:
+            top_frames = []
 
-        # Capture frames in real-time for the next N frames
+        print(f"[Capture] Capturing additional frames until weight stabilizes...")
+        print(f"[Capture] Starting with: Side={len(side_frames)}, Top={len(top_frames)}, Target minimum: {num_frames}")
+
         start_time = time.time()
         frame_interval = 1.0 / self.camera_fps  # Expected interval between frames
+        max_capture_time = 10.0  # Maximum capture time (safety limit)
 
-        for i in range(num_frames):
+        # Track weight stability during capture
+        stable_start_time = None
+        capture_settling_time = 0.5  # Wait 0.5s of stability before stopping
+
+        frame_count = len(side_frames)  # Start count from pre-captured frames
+
+        while True:
             # Capture from side camera
             with self.side_buffer_lock:
                 if len(self.side_buffer) > 0:
@@ -1019,16 +1235,38 @@ class FusionMVP_v2:
                     frame_data = self.top_buffer[-1]
                     top_frames.append(frame_data['frame'])
 
-            # Wait for next frame (approximately)
+            frame_count += 1
+
+            # Update weight reading
+            self.update_weight()
+
+            # Check weight stability (only after minimum frames captured)
+            if frame_count >= num_frames:
+                if self.is_weight_stable():
+                    if stable_start_time is None:
+                        stable_start_time = time.time()
+                    elif time.time() - stable_start_time >= capture_settling_time:
+                        print(f"[Capture] Weight stable for {capture_settling_time}s, stopping capture")
+                        break
+                else:
+                    stable_start_time = None  # Reset stability timer
+
+            # Wait for next frame
             time.sleep(frame_interval)
 
             # Progress indicator every 30 frames (1 second)
-            if (i + 1) % 30 == 0:
+            if frame_count % 30 == 0:
                 elapsed = time.time() - start_time
-                print(f"[Capture] Progress: {i+1}/{num_frames} frames ({elapsed:.1f}s)")
+                print(f"[Capture] Progress: {frame_count} frames ({elapsed:.1f}s), Weight: {self.filtered_weight:.1f}g")
+
+            # Safety timeout
+            elapsed = time.time() - start_time
+            if elapsed > max_capture_time:
+                print(f"[Capture] Max capture time ({max_capture_time}s) reached, stopping")
+                break
 
         elapsed_time = time.time() - start_time
-        print(f"[Capture] Side: {len(side_frames)}, Top: {len(top_frames)} frames in {elapsed_time:.1f}s")
+        print(f"[Capture] Complete: Side={len(side_frames)}, Top={len(top_frames)} frames in {elapsed_time:.1f}s")
 
         return side_frames, top_frames
 
@@ -1137,6 +1375,294 @@ class FusionMVP_v2:
         avg_movement = total_movement / (len(bbox_history) - 1)
         return avg_movement
 
+    def calculate_iou(self, bbox1: tuple, bbox2: tuple) -> float:
+        """
+        Calculate Intersection over Union (IoU) between two bounding boxes
+
+        Args:
+            bbox1: (x1, y1, x2, y2) coordinates
+            bbox2: (x1, y1, x2, y2) coordinates
+
+        Returns:
+            IoU score (0.0 to 1.0)
+        """
+        x1_1, y1_1, x2_1, y2_1 = bbox1
+        x1_2, y1_2, x2_2, y2_2 = bbox2
+
+        # Calculate intersection
+        x1_inter = max(x1_1, x1_2)
+        y1_inter = max(y1_1, y1_2)
+        x2_inter = min(x2_1, x2_2)
+        y2_inter = min(y2_1, y2_2)
+
+        # Check if there's no intersection
+        if x2_inter <= x1_inter or y2_inter <= y1_inter:
+            return 0.0
+
+        # Calculate areas
+        inter_area = (x2_inter - x1_inter) * (y2_inter - y1_inter)
+        bbox1_area = (x2_1 - x1_1) * (y2_1 - y1_1)
+        bbox2_area = (x2_2 - x1_2) * (y2_2 - y1_2)
+
+        # Calculate IoU
+        union_area = bbox1_area + bbox2_area - inter_area
+        if union_area == 0:
+            return 0.0
+
+        return inter_area / union_area
+
+    def calculate_hand_overlap_ratio(self, hand_bbox: tuple, product_bbox: tuple) -> float:
+        """
+        Calculate how much of the product is covered by the hand
+
+        This is more useful than IoU when hand is much larger than product.
+        Returns the ratio of intersection area to product area.
+
+        Args:
+            hand_bbox: (x1, y1, x2, y2) hand coordinates
+            product_bbox: (x1, y1, x2, y2) product coordinates
+
+        Returns:
+            Overlap ratio (0.0 to 1.0) - how much of product is covered by hand
+        """
+        x1_h, y1_h, x2_h, y2_h = hand_bbox
+        x1_p, y1_p, x2_p, y2_p = product_bbox
+
+        # Calculate intersection
+        x1_inter = max(x1_h, x1_p)
+        y1_inter = max(y1_h, y1_p)
+        x2_inter = min(x2_h, x2_p)
+        y2_inter = min(y2_h, y2_p)
+
+        # Check if there's no intersection
+        if x2_inter <= x1_inter or y2_inter <= y1_inter:
+            return 0.0
+
+        # Calculate intersection and product areas
+        inter_area = (x2_inter - x1_inter) * (y2_inter - y1_inter)
+        product_area = (x2_p - x1_p) * (y2_p - y1_p)
+
+        if product_area == 0:
+            return 0.0
+
+        return inter_area / product_area
+
+    def infer_frames_with_hand_overlap(self, side_frames: List, top_frames: List) -> List:
+        """
+        Run YOLO inference with Hand-Product IoU scoring
+
+        Enhanced v3: Uses hand position from both cameras to determine
+        which product the user is actually holding.
+
+        Strategy:
+        1. Detect hand and products in each frame
+        2. Calculate hand-product overlap for each product
+        3. Accumulate overlap scores across frames
+        4. Combine with motion filtering for final scoring
+
+        Args:
+            side_frames: Frames from side camera
+            top_frames: Frames from top camera
+
+        Returns:
+            List of (class_id, votes, movement_score, hand_overlap_score) tuples
+        """
+        if not side_frames:
+            return []
+
+        print(f"[Inference v3] Processing {len(side_frames)} side frames, {len(top_frames)} top frames")
+        print(f"[Inference v3] Using Hand-Product IoU scoring...")
+
+        # Track per-frame detections with hand info
+        # frame_idx -> {'hand': bbox or None, 'products': {class_id: bbox}}
+        side_frame_data = defaultdict(lambda: {'hand': None, 'products': {}})
+        top_frame_data = defaultdict(lambda: {'hand': None, 'products': {}})
+
+        all_detected_classes = set()
+
+        # ========== Process Side Camera Frames ==========
+        print(f"[Side Camera] Analyzing {len(side_frames)} frames (with CLAHE preprocessing)...")
+        for frame_idx, frame in enumerate(side_frames):
+            # Apply CLAHE preprocessing for consistent brightness
+            preprocessed_frame = self.preprocess_frame(frame)
+            results = self.model.predict(preprocessed_frame, conf=self.confidence_threshold, verbose=False)
+
+            for result in results:
+                for box in result.boxes:
+                    class_id = int(box.cls[0])
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    bbox = (x1, y1, x2, y2)
+
+                    if class_id == 0:  # Hand
+                        side_frame_data[frame_idx]['hand'] = bbox
+                    else:  # Product
+                        side_frame_data[frame_idx]['products'][class_id] = bbox
+                        all_detected_classes.add(class_id)
+
+        # ========== Process Top Camera Frames ==========
+        print(f"[Top Camera] Analyzing {len(top_frames)} frames (with CLAHE preprocessing)...")
+        for frame_idx, frame in enumerate(top_frames):
+            # Apply CLAHE preprocessing for consistent brightness
+            preprocessed_frame = self.preprocess_frame(frame)
+            results = self.model.predict(preprocessed_frame, conf=self.confidence_threshold, verbose=False)
+
+            for result in results:
+                for box in result.boxes:
+                    class_id = int(box.cls[0])
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    bbox = (x1, y1, x2, y2)
+
+                    if class_id == 0:  # Hand
+                        top_frame_data[frame_idx]['hand'] = bbox
+                    else:  # Product
+                        top_frame_data[frame_idx]['products'][class_id] = bbox
+                        all_detected_classes.add(class_id)
+
+        # ========== Calculate Scores for Each Product ==========
+        # Accumulate: motion score (side + top), hand overlap score (side + top)
+        class_scores = defaultdict(lambda: {
+            'side_bbox_history': [],      # Side camera bbox history for motion
+            'top_bbox_history': [],       # Top camera bbox history for motion
+            'side_hand_overlaps': [],
+            'top_hand_overlaps': [],
+            'side_detection_count': 0,
+            'top_detection_count': 0
+        })
+
+        # Gather bbox history and hand overlaps from SIDE camera
+        for frame_idx in sorted(side_frame_data.keys()):
+            frame_info = side_frame_data[frame_idx]
+            hand_bbox = frame_info['hand']
+
+            for class_id, product_bbox in frame_info['products'].items():
+                class_scores[class_id]['side_bbox_history'].append(product_bbox)
+                class_scores[class_id]['side_detection_count'] += 1
+
+                # Calculate hand-product overlap if hand detected
+                if hand_bbox:
+                    overlap = self.calculate_hand_overlap_ratio(hand_bbox, product_bbox)
+                    class_scores[class_id]['side_hand_overlaps'].append(overlap)
+
+        # Gather bbox history and hand overlaps from TOP camera
+        for frame_idx in sorted(top_frame_data.keys()):
+            frame_info = top_frame_data[frame_idx]
+            hand_bbox = frame_info['hand']
+
+            for class_id, product_bbox in frame_info['products'].items():
+                # TOP camera also tracks bbox history for motion detection
+                class_scores[class_id]['top_bbox_history'].append(product_bbox)
+                class_scores[class_id]['top_detection_count'] += 1
+
+                # Calculate hand-product overlap if hand detected
+                if hand_bbox:
+                    overlap = self.calculate_hand_overlap_ratio(hand_bbox, product_bbox)
+                    class_scores[class_id]['top_hand_overlaps'].append(overlap)
+
+        # ========== Calculate Final Scores ==========
+        motion_threshold = 10.0
+        hand_overlap_threshold = 0.1  # 10% overlap to be considered "held"
+
+        candidates = []
+
+        print(f"\n[Hand-Product Analysis] Detected {len(all_detected_classes)} product classes")
+
+        for class_id in all_detected_classes:
+            scores = class_scores[class_id]
+            class_name = self.labels.get(class_id, f'Class {class_id}')
+
+            # Calculate motion score from BOTH cameras (7:3 weighted)
+            side_movement = self.calculate_bbox_movement(scores['side_bbox_history'])
+            top_movement = self.calculate_bbox_movement(scores['top_bbox_history'])
+
+            # Combined motion score (Side 70%, Top 30%)
+            # If one camera doesn't see the product, use the other camera's score
+            if scores['side_bbox_history'] and scores['top_bbox_history']:
+                combined_movement = (side_movement * 0.7) + (top_movement * 0.3)
+            elif scores['side_bbox_history']:
+                combined_movement = side_movement
+            elif scores['top_bbox_history']:
+                combined_movement = top_movement
+            else:
+                combined_movement = 0.0
+
+            # Also check if EITHER camera detected significant movement
+            # This handles cases where product is only visible in one camera
+            side_is_moving = side_movement >= motion_threshold
+            top_is_moving = top_movement >= motion_threshold
+            is_moving = side_is_moving or top_is_moving or combined_movement >= motion_threshold
+
+            # Calculate average hand overlap (side camera)
+            side_overlaps = scores['side_hand_overlaps']
+            avg_side_overlap = sum(side_overlaps) / len(side_overlaps) if side_overlaps else 0.0
+            max_side_overlap = max(side_overlaps) if side_overlaps else 0.0
+
+            # Calculate average hand overlap (top camera)
+            top_overlaps = scores['top_hand_overlaps']
+            avg_top_overlap = sum(top_overlaps) / len(top_overlaps) if top_overlaps else 0.0
+            max_top_overlap = max(top_overlaps) if top_overlaps else 0.0
+
+            # Combined hand overlap score (weighted average: Side 70%, Top 30%)
+            combined_overlap = (avg_side_overlap * 0.7) + (avg_top_overlap * 0.3)
+            max_combined_overlap = max(max_side_overlap, max_top_overlap)
+
+            # Detection count (from both cameras)
+            votes = scores['side_detection_count'] + scores['top_detection_count']
+
+            # Determine if valid candidate
+            has_hand_overlap = max_combined_overlap >= hand_overlap_threshold
+
+            # Log analysis
+            side_status = "✓" if side_is_moving else "✗"
+            top_status = "✓" if top_is_moving else "✗"
+            combined_status = "MOVING ✓" if is_moving else "STATIC ✗"
+            status_hand = f"HAND_OVERLAP ✓ ({max_combined_overlap:.1%})" if has_hand_overlap else "NO_HAND ✗"
+
+            print(f"  [{class_name}]")
+            print(f"    Motion - Side: {side_movement:.1f}px/frame ({side_status}) | Top: {top_movement:.1f}px/frame ({top_status})")
+            print(f"    Motion Combined (7:3): {combined_movement:.1f}px/frame ({combined_status})")
+            print(f"    Hand Overlap - Side: avg={avg_side_overlap:.1%}, max={max_side_overlap:.1%}")
+            print(f"    Hand Overlap - Top:  avg={avg_top_overlap:.1%}, max={max_top_overlap:.1%}")
+            print(f"    Combined Overlap (7:3): {combined_overlap:.1%} | Votes: {votes} (Side:{scores['side_detection_count']}, Top:{scores['top_detection_count']})")
+
+            # Scoring logic:
+            # - Must be moving in at least ONE camera (motion filter)
+            # - Hand overlap boosts priority
+            if is_moving:
+                # Calculate final score: base (votes) + hand overlap bonus
+                # Hand overlap can boost score by up to 2x
+                hand_bonus = 1.0 + combined_overlap  # 1.0 to 2.0x
+                final_score = votes * hand_bonus
+
+                candidates.append({
+                    'class_id': class_id,
+                    'votes': votes,
+                    'movement_score': combined_movement,
+                    'hand_overlap': combined_overlap,
+                    'max_hand_overlap': max_combined_overlap,
+                    'final_score': final_score,
+                    'has_hand_overlap': has_hand_overlap
+                })
+
+                result_status = "✓ CANDIDATE" if has_hand_overlap else "△ MOVING (no hand)"
+                print(f"    → {result_status} | Final Score: {final_score:.1f}")
+            else:
+                print(f"    → ✗ REJECTED (static in both cameras)")
+
+        # Sort by final_score (hand overlap weighted)
+        candidates.sort(key=lambda x: x['final_score'], reverse=True)
+
+        # Convert to legacy format for compatibility
+        # (class_id, votes, movement_score) but with hand-aware ordering
+        result = [(c['class_id'], c['votes'], c['movement_score'], c['hand_overlap'])
+                  for c in candidates]
+
+        print(f"\n[Final Candidates] {len(result)} products (hand-overlap prioritized)")
+        for idx, (class_id, votes, mvmt, overlap) in enumerate(result[:5]):
+            class_name = self.labels.get(class_id, f'Class {class_id}')
+            print(f"  {idx+1}. {class_name}: votes={votes}, movement={mvmt:.1f}, hand_overlap={overlap:.1%}")
+
+        return result
+
     def infer_frames_with_motion(self, frames: List, camera_name: str = "side") -> List:
         """
         Run YOLO inference with motion filtering
@@ -1154,9 +1680,7 @@ class FusionMVP_v2:
         if not frames:
             return []
 
-        print(f"[Inference {camera_name.upper()}] Processing {len(frames)} frames with motion filtering...")
-        if self.use_grayscale:
-            print(f"[Inference {camera_name.upper()}] Grayscale preprocessing enabled")
+        print(f"[Inference {camera_name.upper()}] Processing {len(frames)} frames with motion filtering (CLAHE)...")
 
         # Track per-frame detections: frame_index -> {class_id: bbox}
         frame_detections = defaultdict(dict)
@@ -1164,9 +1688,9 @@ class FusionMVP_v2:
 
         # Collect all detections per frame
         for frame_idx, frame in enumerate(frames):
-            # Apply grayscale preprocessing if enabled
-            processed_frame = self.preprocessor.process(frame)
-            results = self.model.predict(processed_frame, conf=self.confidence_threshold, verbose=False)
+            # Apply CLAHE preprocessing for consistent brightness
+            preprocessed_frame = self.preprocess_frame(frame)
+            results = self.model.predict(preprocessed_frame, conf=self.confidence_threshold, verbose=False)
 
             for result in results:
                 boxes = result.boxes
@@ -1241,8 +1765,9 @@ class FusionMVP_v2:
             # Re-run inference to get results_list for saving
             results_list = []
             for frame in frames:
-                processed_frame = self.preprocessor.process(frame)
-                results = self.model.predict(processed_frame, conf=self.confidence_threshold, verbose=False)
+                # Apply CLAHE preprocessing for consistent brightness
+                preprocessed_frame = self.preprocess_frame(frame)
+                results = self.model.predict(preprocessed_frame, conf=self.confidence_threshold, verbose=False)
                 results_list.append(results[0] if results else None)
 
             self.save_inference_frames(
@@ -1276,10 +1801,16 @@ class FusionMVP_v2:
 
     def infer_both_cameras(self, side_frames: List, top_frames: List, event_id: int = None):
         """
-        Run inference on both cameras and combine results with weighted voting
+        Run inference on both cameras using Hand-Product IoU scoring (v3)
 
-        Side camera has higher weight (70%) as it's more reliable for product detection.
-        Top camera has lower weight (30%) but helps confirm detections.
+        Enhanced v3: Uses hand overlap detection to prioritize products
+        that the user is actually holding.
+
+        Strategy:
+        1. Detect hand and products in both cameras
+        2. Calculate hand-product overlap scores
+        3. Prioritize products with high hand overlap
+        4. Motion filtering as secondary criterion
 
         Args:
             side_frames: List of frames from side camera
@@ -1287,64 +1818,37 @@ class FusionMVP_v2:
             event_id: Optional event ID for debug frame saving
 
         Returns:
-            List of (class_id, weighted_votes) tuples sorted by weighted votes
+            List of (class_id, weighted_votes) tuples sorted by hand-overlap priority
         """
-        print(f"\n[Dual Camera Inference] Side: {len(side_frames)}, Top: {len(top_frames)} frames")
+        print(f"\n[Dual Camera Inference v3] Side: {len(side_frames)}, Top: {len(top_frames)} frames")
+        print(f"[Using Hand-Product IoU for product prioritization]")
 
-        # Get candidates from side camera
-        side_candidates = []
-        if side_frames:
-            moving_side = self.infer_frames_with_motion(side_frames, camera_name="side")
-            side_candidates = [(cid, votes) for cid, votes, _ in moving_side]
+        # Use new hand-overlap inference
+        candidates_with_overlap = self.infer_frames_with_hand_overlap(side_frames, top_frames)
 
-        # Get candidates from top camera
-        top_candidates = []
-        if top_frames:
-            moving_top = self.infer_frames_with_motion(top_frames, camera_name="top")
-            top_candidates = [(cid, votes) for cid, votes, _ in moving_top]
-
-        # Combine with weighted voting
-        weighted_votes = defaultdict(float)
-
-        # Apply side camera weight (70%)
-        for class_id, votes in side_candidates:
-            weighted_votes[class_id] += votes * self.side_camera_weight
-
-        # Apply top camera weight (30%)
-        for class_id, votes in top_candidates:
-            weighted_votes[class_id] += votes * self.top_camera_weight
-
-        # Convert to sorted list
-        final_candidates = [
-            (class_id, int(votes))
-            for class_id, votes in sorted(weighted_votes.items(), key=lambda x: x[1], reverse=True)
-        ]
-
-        # Print combined results
-        print(f"\n[Combined Results] (Side: {self.side_camera_weight*100:.0f}%, Top: {self.top_camera_weight*100:.0f}%)")
-        for idx, (class_id, votes) in enumerate(final_candidates[:5]):
-            class_name = self.labels.get(class_id, f'Class {class_id}')
-            in_side = "S" if any(cid == class_id for cid, _ in side_candidates) else "-"
-            in_top = "T" if any(cid == class_id for cid, _ in top_candidates) else "-"
-            print(f"  {idx+1}. {class_name} (ID {class_id}) - {votes} weighted votes [{in_side}{in_top}]")
+        # Convert to legacy format (class_id, votes) for compatibility
+        # but preserve hand-overlap ordering
+        final_candidates = [(cid, votes) for cid, votes, _, _ in candidates_with_overlap]
 
         # Save debug frames if enabled
         if self.save_debug_frames and event_id is not None:
-            # Save side camera frames
+            # Save side camera frames with annotations
             if side_frames:
                 results_list = []
                 for frame in side_frames:
-                    processed_frame = self.preprocessor.process(frame)
-                    results = self.model.predict(processed_frame, conf=self.confidence_threshold, verbose=False)
+                    # Apply CLAHE preprocessing for consistent brightness
+                    preprocessed_frame = self.preprocess_frame(frame)
+                    results = self.model.predict(preprocessed_frame, conf=self.confidence_threshold, verbose=False)
                     results_list.append(results[0] if results else None)
                 self.save_inference_frames(side_frames, event_id, self.side_camera_id, results_list)
 
-            # Save top camera frames
+            # Save top camera frames with annotations
             if top_frames:
                 results_list = []
                 for frame in top_frames:
-                    processed_frame = self.preprocessor.process(frame)
-                    results = self.model.predict(processed_frame, conf=self.confidence_threshold, verbose=False)
+                    # Apply CLAHE preprocessing for consistent brightness
+                    preprocessed_frame = self.preprocess_frame(frame)
+                    results = self.model.predict(preprocessed_frame, conf=self.confidence_threshold, verbose=False)
                     results_list.append(results[0] if results else None)
                 self.save_inference_frames(top_frames, event_id, self.top_camera_id, results_list)
 
@@ -1802,21 +2306,34 @@ class FusionMVP_v2:
 
                 elif self.state == SystemState.INTERACTION:
                     # Capture frames in real-time AFTER weight change detection
+                    # capture_frames() now continues until weight stabilizes
                     if not self.current_event.captured_frames:
                         # First time in INTERACTION state - capture frames from both cameras
                         print(f"\n[INTERACTION] Capturing frames during user interaction...")
 
-                        # Capture from both cameras
-                        side_frames, top_frames = self.capture_frames(num_frames=self.inference_frames)
+                        # Check if event has pre-captured frames (snapshot taken at weight change moment)
+                        pre_side = getattr(self.current_event, 'pre_captured_side', None)
+                        pre_top = getattr(self.current_event, 'pre_captured_top', None)
+
+                        if pre_side:
+                            print(f"[INTERACTION] Using {len(pre_side)} pre-captured side frames from snapshot")
+                        if pre_top:
+                            print(f"[INTERACTION] Using {len(pre_top)} pre-captured top frames from snapshot")
+
+                        # Capture from both cameras (uses pre-captured + continues until weight stabilizes)
+                        side_frames, top_frames = self.capture_frames(
+                            num_frames=self.inference_frames,
+                            pre_captured_side=pre_side,
+                            pre_captured_top=pre_top
+                        )
                         self.current_event.captured_frames = side_frames
                         self.current_event.top_camera_frames = top_frames
 
-                        print(f"[INTERACTION] Captured Side: {len(side_frames)}, Top: {len(top_frames)} frames")
+                        print(f"[INTERACTION] Total captured - Side: {len(side_frames)}, Top: {len(top_frames)} frames")
 
-                    # Wait for weight to stabilize
-                    if self.is_weight_stable():
-                        print("[INTERACTION] Weight stabilized")
+                        # capture_frames already waited for stability, go directly to VERIFICATION
                         self.state = SystemState.VERIFICATION
+                        continue
 
                 elif self.state == SystemState.VERIFICATION:
                     # Calculate weight change from event start
@@ -1875,9 +2392,15 @@ class FusionMVP_v2:
                                 count = list(products_dict.values())[0]
                                 class_name = self.labels.get(class_id, f'Class {class_id}')
                                 self.ui.update_product(class_name, count, action)
+                                # Add to transaction log
+                                self.ui.add_transaction_log(class_name, count, action)
                             else:
                                 # For multi-products, show combined display
                                 self.ui.update_product(display_str, 1, action)
+                                # Add each product to transaction log separately
+                                for cid, cnt in products_dict.items():
+                                    cname = self.labels.get(cid, f'Class {cid}')
+                                    self.ui.add_transaction_log(cname, cnt, action)
 
                             # Update transaction counter
                             if is_valid:
@@ -1894,8 +2417,29 @@ class FusionMVP_v2:
                             # Mark event as processed
                             self.event_queue.processed_events += 1
 
-                            # Wait 2 seconds to display result
-                            time.sleep(2.0)
+                            # Short display time, but monitor for new events
+                            display_end_time = time.time() + 1.0  # 1 second display
+                            while time.time() < display_end_time:
+                                self.update_weight()
+                                # Check for new weight change during display
+                                delta = abs(self.filtered_weight - self.last_stable_weight)
+                                if delta > self.weight_change_threshold:
+                                    print(f"\n>>> [NEW EVENT] Weight change detected during display: {delta:.1f}g")
+                                    # CRITICAL: Capture buffer snapshot NOW while movement is happening
+                                    pre_side, pre_top = self.snapshot_current_buffers()
+                                    # Create new event with snapshot
+                                    new_event_id = self.event_queue.push(
+                                        start_weight=self.last_stable_weight,
+                                        captured_frames=[],
+                                        top_camera_frames=[]
+                                    )
+                                    # Store pre-captured frames in the event
+                                    if self.event_queue.queue:
+                                        self.event_queue.queue[-1].pre_captured_side = pre_side
+                                        self.event_queue.queue[-1].pre_captured_top = pre_top
+                                    print(f"[NEW EVENT] Event {new_event_id} queued with {len(pre_side)} pre-captured frames")
+                                    break
+                                time.sleep(0.05)
 
                         else:
                             # ERROR: No valid match found
@@ -1914,7 +2458,24 @@ class FusionMVP_v2:
                             self.last_stable_weight = self.filtered_weight
                             print(f"[ERROR RECOVERY] 새 기준 무게 설정: {self.last_stable_weight:.1f}g")
 
-                            time.sleep(3.0)  # Show error message longer
+                            # Short display, monitor for new events
+                            display_end_time = time.time() + 2.0
+                            while time.time() < display_end_time:
+                                self.update_weight()
+                                delta = abs(self.filtered_weight - self.last_stable_weight)
+                                if delta > self.weight_change_threshold:
+                                    # Capture snapshot immediately
+                                    pre_side, pre_top = self.snapshot_current_buffers()
+                                    new_event_id = self.event_queue.push(
+                                        start_weight=self.last_stable_weight,
+                                        captured_frames=[],
+                                        top_camera_frames=[]
+                                    )
+                                    if self.event_queue.queue:
+                                        self.event_queue.queue[-1].pre_captured_side = pre_side
+                                        self.event_queue.queue[-1].pre_captured_top = pre_top
+                                    break
+                                time.sleep(0.05)
 
                     else:
                         # ERROR: No product detected
@@ -1932,7 +2493,24 @@ class FusionMVP_v2:
                         self.last_stable_weight = self.filtered_weight
                         print(f"[ERROR RECOVERY] 새 기준 무게 설정: {self.last_stable_weight:.1f}g")
 
-                        time.sleep(3.0)  # Show error message longer
+                        # Short display, monitor for new events
+                        display_end_time = time.time() + 2.0
+                        while time.time() < display_end_time:
+                            self.update_weight()
+                            delta = abs(self.filtered_weight - self.last_stable_weight)
+                            if delta > self.weight_change_threshold:
+                                # Capture snapshot immediately
+                                pre_side, pre_top = self.snapshot_current_buffers()
+                                new_event_id = self.event_queue.push(
+                                    start_weight=self.last_stable_weight,
+                                    captured_frames=[],
+                                    top_camera_frames=[]
+                                )
+                                if self.event_queue.queue:
+                                    self.event_queue.queue[-1].pre_captured_side = pre_side
+                                    self.event_queue.queue[-1].pre_captured_top = pre_top
+                                break
+                            time.sleep(0.05)
 
                     # Clear current event
                     self.current_event = None
@@ -1995,7 +2573,7 @@ def main():
     """Main entry point"""
     import argparse
 
-    parser = argparse.ArgumentParser(description='MVP Fusion Test v2 (Event Queue)')
+    parser = argparse.ArgumentParser(description='MVP Fusion Test v3 (Hand-Product IoU)')
     parser.add_argument(
         '--config',
         default='config.yaml',
@@ -2023,7 +2601,7 @@ def main():
         sys.exit(1)
 
     # Initialize fusion system
-    fusion = FusionMVP_v2(config_path=args.config, label_path=args.labels)
+    fusion = FusionMVP_v3(config_path=args.config, label_path=args.labels)
 
     # Load model
     if not fusion.load_model():
